@@ -1,0 +1,161 @@
+# A fabrica de video da Villa Pantera (repositorio PUBLICO da organizacao).
+#
+# COPIA DE REFERENCIA: o original mora no ramo `video` do repositorio
+# privado, em estudio/fabrica/fabricar.yml. Mudou aqui, muda la (e vice-versa).
+# Desenho: docs/projeto/2026-10-13-desenho-fabrica-de-video.md (no privado).
+#
+# ⚠️ ESTE REPOSITORIO E PUBLICO, E OS REGISTROS DESTE TRABALHO TAMBEM.
+#   - A encomenda chega TRANCADA (age) numa release rascunho; so a chave
+#     FABRICA_CHAVE abre. O video volta trancado com a chave PUBLICA do
+#     repositorio privado: nem esta fabrica consegue abri-lo de volta.
+#   - Nenhum passo imprime nome de peca, roteiro ou legenda: tudo o que os
+#     programas dizem vai para registro.txt, que volta trancado.
+#   - So roda por workflow_dispatch, que so quem tem escrita aqui dispara.
+name: Fabricar
+run-name: fabricar ${{ inputs.etiqueta }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      etiqueta:
+        description: "A etiqueta da encomenda (e-...)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fabricar-${{ inputs.etiqueta }}
+  cancel-in-progress: false
+
+env:
+  ETIQUETA: ${{ inputs.etiqueta }}
+  # A chave PUBLICA do repositorio privado: tranca o video de volta. Publica
+  # por natureza; a secreta que abre mora so no privado.
+  CHAVE_DO_PRIVADO: "age1zavk2ej7xjyh06vprsgszea4z32clqxm8wpp5snnk3g3f3qnqs0svj52rq"
+  # As versoes da voz: mudou uma, o cache da voz e refeito.
+  VERSOES_DA_VOZ: "torch2.6.0-chatterbox0.1.7-fw1.2.1-av15.1.0-v1"
+
+jobs:
+  fabricar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Conferir a etiqueta
+        run: |
+          [[ "$ETIQUETA" =~ ^e-[0-9a-f]{12}$ ]] || { echo "Etiqueta fora do formato."; exit 1; }
+          echo "REGISTRO=$RUNNER_TEMP/registro.txt" >> "$GITHUB_ENV"
+
+      - name: Instalar o age e o FFmpeg
+        run: |
+          { sudo apt-get update -qq && sudo apt-get install -y -qq age ffmpeg; } >> "$REGISTRO" 2>&1
+
+      - name: Baixar e destrancar a encomenda
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FABRICA_CHAVE: ${{ secrets.FABRICA_CHAVE }}
+        run: |
+          {
+            gh release download "$ETIQUETA" -R "$GITHUB_REPOSITORY" -p pacote.age -D "$RUNNER_TEMP"
+            umask 077
+            printf '%s\n' "$FABRICA_CHAVE" > "$RUNNER_TEMP/chave"
+            age -d -i "$RUNNER_TEMP/chave" -o "$RUNNER_TEMP/pacote.tar" "$RUNNER_TEMP/pacote.age"
+            rm -f "$RUNNER_TEMP/chave" "$RUNNER_TEMP/pacote.age"
+            mkdir -p "$RUNNER_TEMP/obra"
+            tar -xf "$RUNNER_TEMP/pacote.tar" -C "$RUNNER_TEMP/obra" --no-same-owner
+            rm -f "$RUNNER_TEMP/pacote.tar"
+          } >> "$REGISTRO" 2>&1
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-python@v6
+        id: python
+        with:
+          python-version: "3.12"
+
+      - name: Instalar o kit e o navegador do Remotion
+        working-directory: ${{ runner.temp }}/obra/estudio/kit
+        run: |
+          {
+            npm ci --no-audit --no-fund
+            npx remotion browser ensure
+          } >> "$REGISTRO" 2>&1
+          navegador=$(find node_modules/.remotion -type f -name chrome-headless-shell | head -1)
+          [ -n "$navegador" ] || { echo "Navegador do Remotion não achado."; exit 1; }
+          echo "NAVEGADOR=$PWD/$navegador" >> "$GITHUB_ENV"
+
+      # O modelo da voz (~3 GB) e o transcritor ficam guardados: o Hugging Face
+      # recusou download por excesso de pedidos (429) no teste de 13/10/2026.
+      - name: Guardar a voz entre as rodadas
+        id: cache-voz
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/villa-estudio
+            ~/.cache/huggingface
+          key: voz-${{ env.VERSOES_DA_VOZ }}-py${{ steps.python.outputs.python-version }}
+
+      - name: Instalar a voz
+        if: steps.cache-voz.outputs.cache-hit != 'true'
+        run: |
+          {
+            python3 -m venv ~/.cache/villa-estudio/venv
+            P=~/.cache/villa-estudio/venv/bin/pip
+            $P install -q torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+            $P install -q chatterbox-tts==0.1.7 faster-whisper==1.2.1 "av==15.1.0"
+            mkdir -p ~/.cache/villa-estudio/ptbr && cd ~/.cache/villa-estudio/ptbr
+            for f in t3_pt_br.safetensors s3gen_v3.pt grapheme_mtl_merged_expanded_v1.json; do
+              curl -sSfL --retry 5 --retry-delay 30 -A "VillaPantera-fabrica" -o "$f" \
+                "https://huggingface.co/ResembleAI/Chatterbox-Multilingual-pt-br/resolve/main/$f"
+            done
+            V=~/.cache/villa-estudio/venv/bin/python
+            for i in 1 2 3 4 5; do
+              $V -c "from huggingface_hub import hf_hub_download, snapshot_download; hf_hub_download('ResembleAI/chatterbox','ve.pt'); snapshot_download('Systran/faster-whisper-small')" && break
+              sleep $((i * 30))
+            done
+            ln -sf "$(find ~/.cache/huggingface -path '*ResembleAI--chatterbox*' -name ve.pt | head -1)" ve.pt
+          } >> "$REGISTRO" 2>&1
+
+      # Imprime so "voz: deu certo" e afins: o resto vai para o registro.
+      - name: Fabricar
+        id: fabricar
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}/obra
+        env:
+          HF_HUB_OFFLINE: "1"
+        run: python3 estudio/fabricar.py "$(cat peca.txt)" --registro "$REGISTRO"
+
+      - name: Trancar e devolver
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEU_CERTO: ${{ steps.fabricar.outcome == 'success' }}
+        run: |
+          volta="$RUNNER_TEMP/volta"
+          obra="$RUNNER_TEMP/obra"
+          mkdir -p "$volta"
+          cp "$REGISTRO" "$volta/registro.txt" 2>/dev/null || touch "$volta/registro.txt"
+          nome=falhou.age
+          if [ -f "$obra/peca.txt" ]; then
+            cp "$obra/peca.txt" "$volta/"
+            pasta="$obra/$(cat "$obra/peca.txt")"
+            # O que o Edu pensou volta sempre: o receber confere o registro
+            # publico contra o roteiro, e a pasta guardada fica inteira.
+            cp "$pasta"/{molde.md,fatos.md,roteiro.json,cenas.json} "$volta/" 2>/dev/null || true
+            if [ "$DEU_CERTO" = "true" ] && cp "$pasta"/{video.mp4,palavras.json,receita.json,curto.json} "$volta/" 2>/dev/null; then
+              nome=resultado.age
+            else
+              rm -f "$volta"/{video.mp4,palavras.json,receita.json,curto.json}
+            fi
+          fi
+          ( cd "$volta" && tar -cf "$RUNNER_TEMP/volta.tar" -- * ) 2>/dev/null
+          age -r "$CHAVE_DO_PRIVADO" -o "$RUNNER_TEMP/$nome" "$RUNNER_TEMP/volta.tar"
+          gh release upload "$ETIQUETA" "$RUNNER_TEMP/$nome" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1
+          echo "Devolvido: $nome"
+
+      - name: Limpar
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/obra" "$RUNNER_TEMP/volta" "$RUNNER_TEMP/volta.tar" "$RUNNER_TEMP/chave" "$REGISTRO"
