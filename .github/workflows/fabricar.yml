@@ -76,6 +76,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      # O `npm ci` traz tambem o playwright-core (o quadros.mjs do motion); o
+      # NAVEGADOR daqui e o mesmo para o Remotion e para o motion
+      # (`executablePath: process.env.NAVEGADOR` no estudio/motion/quadros.mjs).
       - name: Instalar o kit e o navegador do Remotion
         working-directory: ${{ runner.temp }}/obra/estudio/kit
         run: |
@@ -142,10 +145,13 @@ jobs:
           if [ -f "$obra/peca.txt" ]; then
             cp "$obra/peca.txt" "$volta/"
             pasta="$obra/$(cat "$obra/peca.txt")"
-            # O que o Edu pensou volta sempre: o receber confere o registro
-            # publico contra o roteiro, e a pasta guardada fica inteira.
-            cp "$pasta"/{molde.md,fatos.md,roteiro.json,cenas.json} "$volta/" 2>/dev/null || true
-            if [ "$DEU_CERTO" = "true" ] && cp "$pasta"/{video.mp4,palavras.json,receita.json,curto.json} "$volta/" 2>/dev/null; then
+            # O que o Edu pensou (e o Davi dirigiu) volta sempre: o receber
+            # confere o registro publico contra o roteiro, e a pasta guardada
+            # fica inteira.
+            cp "$pasta"/{molde.md,fatos.md,roteiro.json,cenas.json,tela.json,motion.html} "$volta/" 2>/dev/null || true
+            # A peca com motion (tela.json) nao tem receita.json: a do Remotion tem.
+            if [ "$DEU_CERTO" = "true" ] && cp "$pasta"/{video.mp4,palavras.json,curto.json} "$volta/" 2>/dev/null \
+                && { [ -f "$pasta/tela.json" ] || cp "$pasta/receita.json" "$volta/" 2>/dev/null; }; then
               nome=resultado.age
             else
               rm -f "$volta"/{video.mp4,palavras.json,receita.json,curto.json}
